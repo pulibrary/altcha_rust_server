@@ -15,8 +15,8 @@ This guide covers deploying the ALTCHA Rust server to production.
 
 ```bash
 # Clone the repository
-git clone https://github.com/princeton-university/altcha-rust-server.git
-cd altcha-rust-server
+git clone https://github.com/pulibrary/altcha_rust_server.git
+cd altcha_rust_server
 
 # Build release version
 cargo build --release
@@ -60,14 +60,16 @@ doas chown www:www /var/log/altcha-server.log
 
 ### 3. Security Configuration
 
-⚠️ **Important**: Change the SECRET_KEY before production deployment!
+⚠️ **Important**: Change the SECRET_KEY before production deployment! We have "ece5b7b9c637456c135dfe87f571bc5e757f5e4e51e24306c8917a69d8540206" in the main.rs
 
 Edit `src/main.rs` and change:
+
 ```rust
 const SECRET_KEY: &str = "your-production-secret-key-here";
 ```
 
 Generate a secure key:
+
 ```bash
 openssl rand -hex 32
 ```
@@ -85,5 +87,3 @@ doas /usr/local/bin/altcha-daemon.sh start
 doas nginx -t  # Test configuration
 doas nginx -s reload  # Reload if test passes
 ```
-
-For complete deployment instructions, see the full documentation.

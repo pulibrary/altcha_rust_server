@@ -258,7 +258,7 @@ async fn challenge_page_handler(
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <title>Verification Required - Princeton University</title>
+    <title>Verification Required - Princeton University Library</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <script type="module" src="https://cdn.jsdelivr.net/npm/altcha@latest/dist/altcha.min.js"></script>
@@ -322,7 +322,7 @@ async fn challenge_page_handler(
 <body>
     <div class="container">
         <div class="logo">
-            🎓 Princeton University
+            🎓 Princeton University Library
         </div>
         <h2>Security Verification Required</h2>
         <p>Please complete the verification below to continue to <strong>{}</strong></p>
@@ -339,7 +339,7 @@ async fn challenge_page_handler(
         </form>
 
         <div class="info">
-            This verification helps protect Princeton University resources from automated abuse.
+            This verification helps protect Princeton University Library resources from automated abuse.
             <br><small>Powered by ALTCHA - Privacy-friendly proof of work</small>
         </div>
     </div>
