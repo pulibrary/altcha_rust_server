@@ -91,6 +91,7 @@ fn sign_challenge(
     Ok(hex::encode(result.into_bytes()))
 }
 
+// 🔐 SECURITY: Create cryptographically signed verification tokens
 fn create_verification_token(
     client_ip: &str,
     domain: &str,
@@ -104,7 +105,7 @@ fn create_verification_token(
     // Create payload: ip|domain|expires
     let payload = format!("{}|{}|{}", client_ip, domain, expires);
 
-    // Sign the payload
+    // Sign the payload with HMAC-SHA256
     let mut mac = HmacSha256::new_from_slice(secret_key.as_bytes())?;
     mac.update(payload.as_bytes());
     let signature = hex::encode(mac.finalize().into_bytes());
@@ -119,6 +120,7 @@ fn create_verification_token(
     Ok(token)
 }
 
+// 🔍 SECURITY: Verify signed tokens cryptographically
 fn verify_token(
     token: &str,
     client_ip: &str,
@@ -127,9 +129,10 @@ fn verify_token(
 ) -> Result<bool, Box<dyn std::error::Error>> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    // Parse token format: base64(payload):signature
     let parts: Vec<&str> = token.split(':').collect();
     if parts.len() != 2 {
-        return Ok(false);
+        return Ok(false); // Invalid format - not base64:signature
     }
 
     let payload_b64 = parts[0];
@@ -139,14 +142,14 @@ fn verify_token(
     let payload_bytes = general_purpose::STANDARD.decode(payload_b64)?;
     let payload = String::from_utf8(payload_bytes)?;
 
-    // Verify signature
+    // Verify HMAC signature
     let mut mac = HmacSha256::new_from_slice(secret_key.as_bytes())?;
     mac.update(payload.as_bytes());
     let expected_signature = hex::encode(mac.finalize().into_bytes());
 
     if provided_signature != expected_signature {
         warn!("Invalid token signature from {}", client_ip);
-        return Ok(false);
+        return Ok(false); // Signature verification failed
     }
 
     // Parse payload: ip|domain|expires
@@ -163,19 +166,19 @@ fn verify_token(
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     if now > expires {
         info!("Expired token from {}", client_ip);
-        return Ok(false);
+        return Ok(false); // Token expired
     }
 
-    // Check IP and domain match
+    // Check IP and domain binding
     if token_ip != client_ip || token_domain != domain {
         warn!(
             "Token IP/domain mismatch: token={}@{}, actual={}@{}",
             token_ip, token_domain, client_ip, domain
         );
-        return Ok(false);
+        return Ok(false); // IP or domain mismatch
     }
 
-    Ok(true)
+    Ok(true) // All validations passed
 }
 
 fn verify_solution(
@@ -338,7 +341,7 @@ async fn verify_handler(
                 client_ip, host_domain
             );
 
-            // Create signed verification token
+            // 🔐 SECURITY: Create signed verification token (not simple "true")
             let token = match create_verification_token(&client_ip, &host_domain, &state.secret_key)
             {
                 Ok(t) => t,
@@ -348,7 +351,7 @@ async fn verify_handler(
                 }
             };
 
-            // Create verification cookie with signed token
+            // Set secure cookie with signed token
             let cookie_value = format!(
                 "{}={}; Path=/; Domain={}; HttpOnly; Secure; SameSite=Strict; Max-Age=86400",
                 COOKIE_NAME, token, host_domain
@@ -384,6 +387,7 @@ async fn verify_handler(
     }
 }
 
+// 🔍 SECURITY ENDPOINT: nginx calls this to validate tokens cryptographically
 async fn validate_handler(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -391,7 +395,7 @@ async fn validate_handler(
     let client_ip = get_client_ip(&headers);
     let host_domain = get_host_domain(&headers);
 
-    // Get token from cookie
+    // Extract token from cookie header
     let token = if let Some(cookie_header) = headers.get("cookie") {
         if let Ok(cookie_str) = cookie_header.to_str() {
             // Parse cookies to find altcha_verified
@@ -419,25 +423,25 @@ async fn validate_handler(
         return Err(StatusCode::UNAUTHORIZED);
     };
 
-    // Validate the token
+    // 🔐 SECURITY: Cryptographically validate the token
     match verify_token(&token, &client_ip, &host_domain, &state.secret_key) {
         Ok(true) => {
             info!(
                 "Valid token for IP: {} on domain: {}",
                 client_ip, host_domain
             );
-            Ok(StatusCode::OK)
+            Ok(StatusCode::OK) // nginx gets 200 → allows access
         }
         Ok(false) => {
             warn!(
                 "Invalid token from IP: {} on domain: {}",
                 client_ip, host_domain
             );
-            Err(StatusCode::UNAUTHORIZED)
+            Err(StatusCode::UNAUTHORIZED) // nginx gets 401 → blocks access
         }
         Err(e) => {
             warn!("Token validation error for {}: {}", client_ip, e);
-            Err(StatusCode::UNAUTHORIZED)
+            Err(StatusCode::UNAUTHORIZED) // nginx gets 401 → blocks access
         }
     }
 }
@@ -455,12 +459,31 @@ async fn challenge_page_handler(
         .return_to
         .unwrap_or_else(|| format!("https://{}/", host));
 
+    // Customize content based on domain
+    let (page_title, service_name, description) = match host {
+        "oar.princeton.edu" => (
+            "Verification Required - Princeton OAR",
+            "Princeton OAR (Open Access Repository)",
+            "Princeton OAR repository",
+        ),
+        "dataspace.princeton.edu" => (
+            "Verification Required - Princeton DataSpace",
+            "Princeton DataSpace",
+            "Princeton DataSpace repository",
+        ),
+        _ => (
+            "Verification Required - Princeton University",
+            "Princeton University",
+            "Princeton University resources",
+        ),
+    };
+
     let html = format!(
         r#"
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <title>Verification Required - Princeton University Library</title>
+    <title>{}</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <script type="module" src="https://cdn.jsdelivr.net/npm/altcha@latest/dist/altcha.min.js"></script>
@@ -524,7 +547,7 @@ async fn challenge_page_handler(
 <body>
     <div class="container">
         <div class="logo">
-            🎓 Princeton University Library
+            🎓 {}
         </div>
         <h2>Security Verification Required</h2>
         <p>Please complete the verification below to continue to <strong>{}</strong></p>
@@ -541,7 +564,7 @@ async fn challenge_page_handler(
         </form>
 
         <div class="info">
-            This verification helps protect Princeton University Library resources from automated abuse.
+            This verification helps protect {} from automated abuse.
             <br><small>Powered by ALTCHA - Privacy-friendly proof of work</small>
         </div>
     </div>
@@ -623,7 +646,7 @@ async fn challenge_page_handler(
 </body>
 </html>
 "#,
-        host, return_to
+        page_title, service_name, host, description, return_to
     );
 
     Html(html)
@@ -640,10 +663,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build the application with routes
     let app = Router::new()
-        .route("/api/challenge", get(challenge_handler))
-        .route("/api/verify", post(verify_handler))
-        .route("/api/validate", get(validate_handler))
-        .route("/", get(challenge_page_handler))
+        .route("/api/challenge", get(challenge_handler)) // Public: Generate challenges
+        .route("/api/verify", post(verify_handler)) // Public: Verify solutions
+        .route("/api/validate", get(validate_handler)) // 🔐 SECURITY: nginx auth_request endpoint
+        .route("/", get(challenge_page_handler)) // Public: Verification page
         .layer(
             ServiceBuilder::new().layer(
                 CorsLayer::new()
@@ -657,7 +680,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = TcpListener::bind("127.0.0.1:8080").await?;
     info!("ALTCHA server starting on http://127.0.0.1:8080");
-    info!("Serving domains: dataspace.princeton.edu, oar.princeton.edu");
+    info!("🔐 Security endpoints: /api/validate (nginx auth_request)");
+    info!("🌐 Serving domains: dataspace.princeton.edu, oar.princeton.edu");
 
     axum::serve(listener, app).await?;
 
