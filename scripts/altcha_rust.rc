@@ -1,0 +1,18 @@
+#!/bin/ksh
+
+# OpenBSD rc.d script for ALTCHA Rust server
+# Place this file at /etc/rc.d/altcha_rust
+# Make executable: chmod +x /etc/rc.d/altcha_rust
+# Enable at boot: rcctl enable altcha_rust
+
+daemon="/usr/local/bin/altcha-server"
+daemon_user="root"
+daemon_flags=""
+
+. /etc/rc.d/rc.subr
+
+pexp="${daemon}"
+rc_bg=YES
+rc_reload=NO
+
+rc_cmd $1
