@@ -1,6 +1,6 @@
 use axum::{
     extract::{Query, State},
-    http::{header, HeaderValue, StatusCode, Method},
+    http::{header, HeaderValue, Method, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -62,33 +62,46 @@ fn generate_salt() -> String {
     hex::encode(bytes)
 }
 
-fn generate_challenge(salt: &str, _secret_key: &str) -> Result<(String, u32), Box<dyn std::error::Error>> {
+fn generate_challenge(
+    salt: &str,
+    _secret_key: &str,
+) -> Result<(String, u32), Box<dyn std::error::Error>> {
     // ALTCHA proof-of-work: generate a secret number and create challenge from it
     let mut rng = rand::thread_rng();
     let secret_number: u32 = rng.gen_range(0..MAX_NUMBER);
-    
+
     // Create challenge by hashing salt + secret_number
     let work_data = format!("{}{}", salt, secret_number);
     let mut hasher = Sha256::new();
     hasher.update(work_data.as_bytes());
     let hash = hasher.finalize();
     let challenge = hex::encode(hash);
-    
+
     Ok((challenge, secret_number))
 }
 
-fn sign_challenge(challenge: &str, salt: &str, secret_key: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn sign_challenge(
+    challenge: &str,
+    salt: &str,
+    secret_key: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
     let mut mac = HmacSha256::new_from_slice(secret_key.as_bytes())?;
     mac.update(format!("{}{}", challenge, salt).as_bytes());
     let result = mac.finalize();
     Ok(hex::encode(result.into_bytes()))
 }
 
-fn verify_solution(payload: &AltchaPayload, secret_key: &str) -> Result<bool, Box<dyn std::error::Error>> {
+fn verify_solution(
+    payload: &AltchaPayload,
+    secret_key: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
     // Verify signature
     let expected_signature = sign_challenge(&payload.challenge, &payload.salt, secret_key)?;
     if payload.signature != expected_signature {
-        warn!("Signature mismatch. Expected: {}, Got: {}", expected_signature, payload.signature);
+        warn!(
+            "Signature mismatch. Expected: {}, Got: {}",
+            expected_signature, payload.signature
+        );
         return Ok(false);
     }
 
@@ -101,12 +114,22 @@ fn verify_solution(payload: &AltchaPayload, secret_key: &str) -> Result<bool, Bo
 
     // Check if hash exactly matches challenge
     let challenge_met = hash_hex == payload.challenge;
-    
-    info!("Verifying: salt={}, number={}, hash={}, challenge={}, matches={}", 
-          payload.salt, payload.number, &hash_hex[..8], &payload.challenge[..8], challenge_met);
-    
+
+    info!(
+        "Verifying: salt={}, number={}, hash={}, challenge={}, matches={}",
+        payload.salt,
+        payload.number,
+        &hash_hex[..8],
+        &payload.challenge[..8],
+        challenge_met
+    );
+
     if !challenge_met {
-        warn!("Proof of work failed. Hash: {}, Challenge: {}", &hash_hex[..8], &payload.challenge[..8]);
+        warn!(
+            "Proof of work failed. Hash: {}, Challenge: {}",
+            &hash_hex[..8],
+            &payload.challenge[..8]
+        );
         return Ok(false);
     }
 
@@ -146,9 +169,11 @@ fn get_client_ip(headers: &axum::http::HeaderMap) -> String {
     "unknown".to_string()
 }
 
-async fn challenge_handler(State(state): State<Arc<AppState>>) -> Result<Json<Challenge>, StatusCode> {
+async fn challenge_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Challenge>, StatusCode> {
     info!("Challenge endpoint called");
-    
+
     let salt = generate_salt();
     let (challenge, secret_number) = match generate_challenge(&salt, &state.secret_key) {
         Ok(result) => result,
@@ -188,7 +213,10 @@ async fn verify_handler(
 ) -> Result<Response, StatusCode> {
     let client_ip = get_client_ip(&headers);
     let host_domain = get_host_domain(&headers);
-    info!("Verification attempt from IP: {} for domain: {}", client_ip, host_domain);
+    info!(
+        "Verification attempt from IP: {} for domain: {}",
+        client_ip, host_domain
+    );
 
     // Decode base64 payload
     let payload_bytes = match general_purpose::STANDARD.decode(&req.altcha) {
@@ -211,7 +239,10 @@ async fn verify_handler(
     // Verify the solution
     match verify_solution(&payload, &state.secret_key) {
         Ok(true) => {
-            info!("ALTCHA verification successful for IP: {} on domain: {}", client_ip, host_domain);
+            info!(
+                "ALTCHA verification successful for IP: {} on domain: {}",
+                client_ip, host_domain
+            );
 
             // Create verification cookie with dynamic domain
             let cookie_value = format!(
@@ -222,7 +253,8 @@ async fn verify_handler(
             let mut response = Json(serde_json::json!({
                 "status": "verified",
                 "message": "Verification successful"
-            })).into_response();
+            }))
+            .into_response();
 
             response.headers_mut().insert(
                 header::SET_COOKIE,
@@ -232,11 +264,17 @@ async fn verify_handler(
             Ok(response)
         }
         Ok(false) => {
-            warn!("ALTCHA verification failed for IP: {} on domain: {}", client_ip, host_domain);
+            warn!(
+                "ALTCHA verification failed for IP: {} on domain: {}",
+                client_ip, host_domain
+            );
             Err(StatusCode::BAD_REQUEST)
         }
         Err(e) => {
-            warn!("Error verifying solution from {} on domain {}: {}", client_ip, host_domain, e);
+            warn!(
+                "Error verifying solution from {} on domain {}: {}",
+                client_ip, host_domain, e
+            );
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -251,7 +289,9 @@ async fn challenge_page_handler(
         .and_then(|h| h.to_str().ok())
         .unwrap_or("localhost");
 
-    let return_to = params.return_to.unwrap_or_else(|| format!("https://{}/", host));
+    let return_to = params
+        .return_to
+        .unwrap_or_else(|| format!("https://{}/", host));
 
     let html = format!(
         r#"
@@ -442,14 +482,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/verify", post(verify_handler))
         .route("/", get(challenge_page_handler))
         .layer(
-            ServiceBuilder::new()
-                .layer(
-                    CorsLayer::new()
-                        .allow_origin(Any)
-                        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-                        .allow_headers(Any)
-                        .allow_credentials(false)
-                )
+            ServiceBuilder::new().layer(
+                CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                    .allow_headers(Any)
+                    .allow_credentials(false),
+            ),
         )
         .with_state(state);
 
