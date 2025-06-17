@@ -91,6 +91,93 @@ fn sign_challenge(
     Ok(hex::encode(result.into_bytes()))
 }
 
+fn create_verification_token(
+    client_ip: &str,
+    domain: &str,
+    secret_key: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let expires = timestamp + 86400; // 24 hours
+
+    // Create payload: ip|domain|expires
+    let payload = format!("{}|{}|{}", client_ip, domain, expires);
+
+    // Sign the payload
+    let mut mac = HmacSha256::new_from_slice(secret_key.as_bytes())?;
+    mac.update(payload.as_bytes());
+    let signature = hex::encode(mac.finalize().into_bytes());
+
+    // Create token: base64(payload):signature
+    let token = format!(
+        "{}:{}",
+        general_purpose::STANDARD.encode(payload.as_bytes()),
+        signature
+    );
+
+    Ok(token)
+}
+
+fn verify_token(
+    token: &str,
+    client_ip: &str,
+    domain: &str,
+    secret_key: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let parts: Vec<&str> = token.split(':').collect();
+    if parts.len() != 2 {
+        return Ok(false);
+    }
+
+    let payload_b64 = parts[0];
+    let provided_signature = parts[1];
+
+    // Decode payload
+    let payload_bytes = general_purpose::STANDARD.decode(payload_b64)?;
+    let payload = String::from_utf8(payload_bytes)?;
+
+    // Verify signature
+    let mut mac = HmacSha256::new_from_slice(secret_key.as_bytes())?;
+    mac.update(payload.as_bytes());
+    let expected_signature = hex::encode(mac.finalize().into_bytes());
+
+    if provided_signature != expected_signature {
+        warn!("Invalid token signature from {}", client_ip);
+        return Ok(false);
+    }
+
+    // Parse payload: ip|domain|expires
+    let payload_parts: Vec<&str> = payload.split('|').collect();
+    if payload_parts.len() != 3 {
+        return Ok(false);
+    }
+
+    let token_ip = payload_parts[0];
+    let token_domain = payload_parts[1];
+    let expires: u64 = payload_parts[2].parse()?;
+
+    // Check expiration
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    if now > expires {
+        info!("Expired token from {}", client_ip);
+        return Ok(false);
+    }
+
+    // Check IP and domain match
+    if token_ip != client_ip || token_domain != domain {
+        warn!(
+            "Token IP/domain mismatch: token={}@{}, actual={}@{}",
+            token_ip, token_domain, client_ip, domain
+        );
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
 fn verify_solution(
     payload: &AltchaPayload,
     secret_key: &str,
@@ -194,8 +281,15 @@ async fn challenge_handler(
             };
 
             // Debug the response
-            info!("Generated challenge response: algorithm={}, challenge={}, maxnumber={}, salt={}, signature={}, secret_number={}", 
-                  response.algorithm, &response.challenge[..8], response.maxnumber, response.salt, &response.signature[..8], secret_number);
+            info!(
+                "Generated challenge response: algorithm={}, challenge={}, maxnumber={}, salt={}, signature={}, secret_number={}",
+                response.algorithm,
+                &response.challenge[..8],
+                response.maxnumber,
+                response.salt,
+                &response.signature[..8],
+                secret_number
+            );
 
             Ok(Json(response))
         }
@@ -244,10 +338,20 @@ async fn verify_handler(
                 client_ip, host_domain
             );
 
-            // Create verification cookie with dynamic domain
+            // Create signed verification token
+            let token = match create_verification_token(&client_ip, &host_domain, &state.secret_key)
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("Failed to create verification token: {}", e);
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+            };
+
+            // Create verification cookie with signed token
             let cookie_value = format!(
-                "{}=true; Path=/; Domain={}; HttpOnly; Secure; SameSite=Strict; Max-Age=86400",
-                COOKIE_NAME, host_domain
+                "{}={}; Path=/; Domain={}; HttpOnly; Secure; SameSite=Strict; Max-Age=86400",
+                COOKIE_NAME, token, host_domain
             );
 
             let mut response = Json(serde_json::json!({
@@ -276,6 +380,64 @@ async fn verify_handler(
                 client_ip, host_domain, e
             );
             Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn validate_handler(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<StatusCode, StatusCode> {
+    let client_ip = get_client_ip(&headers);
+    let host_domain = get_host_domain(&headers);
+
+    // Get token from cookie
+    let token = if let Some(cookie_header) = headers.get("cookie") {
+        if let Ok(cookie_str) = cookie_header.to_str() {
+            // Parse cookies to find altcha_verified
+            let mut found_token = None;
+            for cookie in cookie_str.split(';') {
+                let cookie = cookie.trim();
+                if let Some(value) = cookie.strip_prefix(&format!("{}=", COOKIE_NAME)) {
+                    found_token = Some(value.to_string());
+                    break;
+                }
+            }
+            match found_token {
+                Some(token) => token,
+                None => {
+                    info!("No {} cookie found from {}", COOKIE_NAME, client_ip);
+                    return Err(StatusCode::UNAUTHORIZED);
+                }
+            }
+        } else {
+            warn!("Invalid cookie header from {}", client_ip);
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    } else {
+        info!("No cookie header from {}", client_ip);
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+
+    // Validate the token
+    match verify_token(&token, &client_ip, &host_domain, &state.secret_key) {
+        Ok(true) => {
+            info!(
+                "Valid token for IP: {} on domain: {}",
+                client_ip, host_domain
+            );
+            Ok(StatusCode::OK)
+        }
+        Ok(false) => {
+            warn!(
+                "Invalid token from IP: {} on domain: {}",
+                client_ip, host_domain
+            );
+            Err(StatusCode::UNAUTHORIZED)
+        }
+        Err(e) => {
+            warn!("Token validation error for {}: {}", client_ip, e);
+            Err(StatusCode::UNAUTHORIZED)
         }
     }
 }
@@ -431,7 +593,7 @@ async fn challenge_page_handler(
             // Get the payload from the form data or widget value
             const formData = new FormData(form);
             const payload = formData.get('altcha') || widget.value;
-            
+
             if (!payload) {{
                 alert('Please complete the verification first.');
                 return;
@@ -480,6 +642,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/api/challenge", get(challenge_handler))
         .route("/api/verify", post(verify_handler))
+        .route("/api/validate", get(validate_handler))
         .route("/", get(challenge_page_handler))
         .layer(
             ServiceBuilder::new().layer(
